@@ -2,28 +2,28 @@ name: Update Checker
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: v24.10.1
+  REPO_BRANCH: openwrt-25.12  # 修改为 v25 分支
 
 on:
   workflow_dispatch:
-#  schedule:
-#    - cron: 0 */18 * * *
+  schedule:
+    - cron: 0 */18 * * * # 每18小时自动检查一次
 
 jobs:
   check:
     runs-on: ubuntu-latest
 
     steps:
-
     - name: Get Commit Hash
       id: getHash
       run: |
+        # 仅获取 HEAD 记录以节省资源
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH .
         echo "commitHash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
     - name: Compare Commit Hash
       id: cacheHash
-      uses: actions/cache@v3
+      uses: actions/cache@v4  # 升级到 v4
       with:
         path: .commitHash
         key: commitHash_${{ steps.getHash.outputs.commitHash }}
@@ -35,13 +35,15 @@ jobs:
 
     - name: Trigger build
       if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@v2
+      uses: peter-evans/repository-dispatch@v3 # 升级到 v3
       with:
-        token: ${{ github.token }}
+        # 注意：此处必须使用你在 Settings -> Developer settings 中创建的 PAT (个人访问令牌)
+        # 并将其存放在仓库的 Secrets 中，命名为 GH_PAT
+        token: ${{ secrets.GH_PAT }}
         event-type: Source Code Update
 
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
-        retain_days: 0
+        retain_days: 1
         keep_minimum_runs: 2
