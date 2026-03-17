@@ -2,7 +2,8 @@ name: Update Checker
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: openwrt-25.12  # 修改为 v25 分支
+  REPO_BRANCH: v24.10.5  # 锁定最新稳定版分支
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # 强制使用 Node 24 环境
 
 on:
   workflow_dispatch:
@@ -17,16 +18,16 @@ jobs:
     - name: Get Commit Hash
       id: getHash
       run: |
-        # 仅获取 HEAD 记录以节省资源
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH .
-        echo "commitHash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+        # 使用 ls-remote 毫秒级获取最新 Hash，无需克隆仓库
+        commitHash=$(git ls-remote $REPO_URL $REPO_BRANCH | awk '{print $1}')
+        echo "commitHash=$commitHash" >> $GITHUB_OUTPUT
 
     - name: Compare Commit Hash
       id: cacheHash
-      uses: actions/cache@v4  # 升级到 v4
+      uses: actions/cache@v4 # 升级至 v4 适配最新 Node 环境
       with:
         path: .commitHash
-        key: commitHash_${{ steps.getHash.outputs.commitHash }}
+        key: v24-commitHash-${{ steps.getHash.outputs.commitHash }}
 
     - name: Save New Commit Hash
       if: steps.cacheHash.outputs.cache-hit != 'true'
@@ -35,10 +36,8 @@ jobs:
 
     - name: Trigger build
       if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@v3 # 升级到 v3
+      uses: peter-evans/repository-dispatch@v3 # 升级至 v3 适配最新环境
       with:
-        # 注意：此处必须使用你在 Settings -> Developer settings 中创建的 PAT (个人访问令牌)
-        # 并将其存放在仓库的 Secrets 中，命名为 GH_PAT
         token: ${{ secrets.GH_PAT }}
         event-type: Source Code Update
 
