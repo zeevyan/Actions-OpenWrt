@@ -1,37 +1,31 @@
-name: ImmortalWrt v25 Multi-Arch Builder
+name: ImmortalWrt Builder (Optimized)
 
 on:
   repository_dispatch:
   workflow_dispatch:
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: openwrt-25.12
+  REPO_BRANCH: v24.10.5
   FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # 强制使用 Node 24
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    
-    strategy:
-      fail-fast: false
-      matrix:
-        # 同时启动两个虚拟机分别编译
-        target: [x86_64, arm64]
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: Free Disk Space (Ubuntu)
       uses: jlumbroso/free-disk-space@main
@@ -44,13 +38,12 @@ jobs:
         docker-images: true
         swap-storage: true
 
-
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        # 这一行是核心：增加了 libelf-dev, zstd, 以及其他编译 v25 所需的工具
+        # 补全了 libelf-dev, zstd, g++-multilib 等关键依赖
         sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget libelf-dev zstd
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
@@ -62,7 +55,7 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH immortalwrt
+        git clone $REPO_URL -b $REPO_BRANCH --single-branch immortalwrt
         ln -sf /workdir/immortalwrt $GITHUB_WORKSPACE/immortalwrt
 
     - name: Load custom feeds
@@ -81,13 +74,7 @@ jobs:
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files immortalwrt/files
-        # 读取对应的 .config 文件
-        if [ -e "${{ matrix.target }}.config" ]; then
-          mv "${{ matrix.target }}.config" immortalwrt/.config
-        else
-          echo "警告: 未找到 ${{ matrix.target }}.config，将使用默认配置"
-        fi
-        
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE immortalwrt/.config
         chmod +x $DIY_P2_SH
         cd immortalwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
@@ -96,7 +83,7 @@ jobs:
       id: package
       run: |
         cd immortalwrt
-        # 注入 TurboACC (注意：25版本内核较新，若脚本报错请检查脚本兼容性)
+        # 针对新版本内核的 TurboACC 注入
         curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh -o add_turboacc.sh
         bash add_turboacc.sh --no-sfe        
         make defconfig
@@ -109,9 +96,11 @@ jobs:
       run: |
         cd immortalwrt
         echo -e "$(nproc) thread compile"
+        # 优先多线程，失败则转单线程输出详细日志
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_$(cat DEVICE_NAME 2>/dev/null || echo ${{ matrix.target }})" >> $GITHUB_ENV
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Check space usage
@@ -122,34 +111,50 @@ jobs:
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
+        # 更加健壮的目录寻找逻辑
         cd immortalwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: ImmortalWrt_v25_${{ matrix.target }}${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: ImmortalWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=${{ matrix.target }}-v25-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "🔥 ImmortalWrt 25.12 最新版" >> release.txt
-        echo "💻 架构: ${{ matrix.target }}" >> release.txt
+        echo "🚀 ImmortalWrt 自动编译发布" >> release.txt
+        echo "🍁 源码分支: ${{ env.REPO_BRANCH }}" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
+      uses: softprops/action-gh-release@v2
       if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.3.0
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 10
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
