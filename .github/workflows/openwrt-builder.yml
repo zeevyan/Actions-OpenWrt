@@ -1,5 +1,4 @@
-# 代码
-name: ImmortalWrt Builder
+name: ImmortalWrt v25 Multi-Arch Builder
 
 on:
   repository_dispatch:
@@ -7,9 +6,8 @@ on:
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: v24.10.4
+  REPO_BRANCH: openwrt-25.12
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
@@ -19,9 +17,16 @@ env:
 
 jobs:
   build:
+    name: Build ${{ matrix.target }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        # 同时启动两个虚拟机分别编译
+        target: [x86_64, arm64]
 
     steps:
     - name: Checkout
@@ -30,12 +35,7 @@ jobs:
     - name: Free Disk Space (Ubuntu)
       uses: jlumbroso/free-disk-space@main
       with:
-        # this might remove tools that are actually needed,
-        # if set to "true" but frees about 6 GB
         tool-cache: true
-        
-        # all of these default to true, but feel free to set to
-        # "false" if necessary for your workflow
         android: true
         dotnet: true
         haskell: true
@@ -48,7 +48,8 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget
+        # 针对新版本可能增加的依赖库进行优化
+        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget libelf-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -74,11 +75,17 @@ jobs:
 
     - name: Install feeds
       run: cd immortalwrt && ./scripts/feeds install -a
-       
+        
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files immortalwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE immortalwrt/.config
+        # 读取对应的 .config 文件
+        if [ -e "${{ matrix.target }}.config" ]; then
+          mv "${{ matrix.target }}.config" immortalwrt/.config
+        else
+          echo "警告: 未找到 ${{ matrix.target }}.config，将使用默认配置"
+        fi
+        
         chmod +x $DIY_P2_SH
         cd immortalwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
@@ -87,6 +94,7 @@ jobs:
       id: package
       run: |
         cd immortalwrt
+        # 注入 TurboACC (注意：25版本内核较新，若脚本报错请检查脚本兼容性)
         curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh -o add_turboacc.sh
         bash add_turboacc.sh --no-sfe        
         make defconfig
@@ -101,20 +109,12 @@ jobs:
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "DEVICE_NAME=_$(cat DEVICE_NAME 2>/dev/null || echo ${{ matrix.target }})" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: ImmortalWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: immortalwrt/bin
 
     - name: Organize files
       id: organize
@@ -129,16 +129,17 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: ImmortalWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: ImmortalWrt_v25_${{ matrix.target }}${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=${{ matrix.target }}-v25-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
+        echo "🔥 ImmortalWrt 25.12 最新版" >> release.txt
+        echo "💻 架构: ${{ matrix.target }}" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -150,18 +151,3 @@ jobs:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
-      with:
-        retain_days: 0
-        keep_minimum_runs: 2
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 10
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
