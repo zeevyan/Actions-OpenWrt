@@ -7,8 +7,8 @@ env:
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: 0 */18 * * * # 每18小时自动检查一次
+#  schedule:
+#   - cron: 0 */18 * * * # 每18小时自动检查一次
 
 jobs:
   check:
